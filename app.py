@@ -1,53 +1,77 @@
+#!/usr/bin/python3
 from flask import Flask, request, jsonify
-import os
-import time
-import matplotlib.pyplot as plt
-import numpy as np
-import base64
-from io import BytesIO
+from sqlalchemy import text
+
+from analysis.analyzer import run_analysis
+from analysis.graph import generate_graph
+from database.connection import engine
 
 app = Flask(__name__)
 
-if not os.path.exists("graphs"):
-    os.makedirs("graphs")
 
-@app.route('/')
-def home():
-    return "Welcome! POST to /graph to generate a complexity graph."
+@app.route("/analyze", methods=["GET"])
+def analyze():
+    algo = request.args.get("algo")
+    n = int(request.args.get("n", 0))
+    steps = int(request.args.get("steps", 1))
 
-@app.route('/graph', methods=['POST'])
-def generate_graph():
-    input_size = np.arange(1, 11)
-    time_complexity = np.random.randint(1, 100, size=10)
-    
-    plt.figure()
-    plt.plot(input_size, time_complexity, marker='o', linestyle='-', color='b')
-    plt.title("Complexity Graph")
-    plt.xlabel("Input Size")
-    plt.ylabel("Time (ms)")
-    
-    timestamp = int(time.time())
-    filename = f"graphs/graph_{timestamp}.png"
-    plt.savefig(filename)
-    plt.close()
+    result = run_analysis(algo, n, steps)
+    graph = generate_graph(range(steps), result["timings"])
 
-    buffer = BytesIO()
-    plt.figure()
-    plt.plot(input_size, time_complexity, marker='o', linestyle='-', color='b')
-    plt.title("Complexity Graph")
-    plt.xlabel("Input Size")
-    plt.ylabel("Time (ms)")
-    plt.savefig(buffer, format='png')
-    buffer.seek(0)
-    image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-    buffer.close()
-    
     return jsonify({
-        "message": "Graph generated successfully!",
-        "file_saved": filename,
-        "preview_base64": image_base64
+        "algo": algo,
+        "items": n,
+        "steps": steps,
+        "start_time": result["start_time"],
+        "end_time": result["end_time"],
+        "total_time_ms": result["total_time_ms"],
+        "time_complexity": "O(n^2)",
+        "graph_base64": graph
     })
 
-if __name__ == '__main__':
-    app.run(debug=True, port=3000)
 
+@app.route("/save_analysis", methods=["POST"])
+def save_analysis():
+    data = request.get_json()
+
+    query = text("""
+        INSERT INTO algo_analysis
+        (algo, items, steps, start_time, end_time,
+         total_time_ms, time_complexity, graph_base64)
+        VALUES
+        (:algo, :items, :steps, :start_time, :end_time,
+         :total_time_ms, :time_complexity, :graph_base64)
+    """)
+
+    with engine.connect() as conn:
+        result = conn.execute(query, data)
+        conn.commit()
+        analysis_id = result.lastrowid
+
+    return jsonify({
+        "status": "success",
+        "id": analysis_id
+    }), 201
+
+
+@app.route("/retrieve_analysis", methods=["GET"])
+def retrieve_analysis():
+    analysis_id = request.args.get("id")
+
+    query = text(
+        "SELECT * FROM algo_analysis WHERE id = :id"
+    )
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            query, {"id": analysis_id}
+        ).fetchone()
+
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+
+    return jsonify(dict(row))
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=3000)
